@@ -327,7 +327,9 @@ window.addEventListener('DOMContentLoaded',()=>{
 
 // API Key
 function connectAPI(){
-  const key=document.getElementById('apiKeyInput').value.trim();
+  const raw=document.getElementById('apiKeyInput').value;
+  // Strip all non-ASCII and invisible characters
+  const key=raw.replace(/[^\x20-\x7E]/g,'').trim();
   if(!key) return showToast('Pega tu API key primero');
   rapidApiKey=key;
   localStorage.setItem('fs_rapidapi_key',key);
@@ -415,10 +417,10 @@ async function fetchFromZillow(c){
         result_type: 'list'
       });
       const r=await fetch(`https://zillow-real-estate-api.p.rapidapi.com/v1/search?${params}`,
-        {headers:{'X-RapidAPI-Key':rapidApiKey,'X-RapidAPI-Host':'zillow-real-estate-api.p.rapidapi.com'}});
+        {headers:{'X-RapidAPI-Key':rapidApiKey.replace(/[^\x20-\x7E]/g,'').trim(),'X-RapidAPI-Host':'zillow-real-estate-api.p.rapidapi.com'}});
       const d=await r.json();
       console.log('Zillow raw response:', JSON.stringify(d).slice(0,500));
-      const listings=d.properties||d.results||d.props||d.data||d.listings||(Array.isArray(d)?d:[]);
+      const listings=d?.data?.results||d.properties||d.results||d.props||(Array.isArray(d)?d:[]);
       if(Array.isArray(listings)&&listings.length) results.push(...listings.slice(0,4));
     }catch(e){console.warn('Zillow error',zone,e);}
   }
@@ -427,18 +429,18 @@ async function fetchFromZillow(c){
 }
 
 async function analyzeWithClaude(listings,c){
-  // Normalize different response formats from various Zillow APIs
   const cleaned=listings.map(l=>({
-    address: l.streetAddress||l.address||l.hdpData?.homeInfo?.streetAddress||l.formattedAddress||'N/A',
-    city: l.city||l.hdpData?.homeInfo?.city||'N/A',
-    state: l.state||l.hdpData?.homeInfo?.state||'AL',
-    zip: l.zipcode||l.zip||l.hdpData?.homeInfo?.zipcode||'',
-    price: l.price||l.unformattedPrice||l.hdpData?.homeInfo?.price||l.listPrice||0,
-    beds: l.bedrooms||l.beds||l.hdpData?.homeInfo?.bedrooms||0,
-    baths: l.bathrooms||l.baths||l.hdpData?.homeInfo?.bathrooms||0,
-    sqft: l.livingArea||l.sqft||l.hdpData?.homeInfo?.livingArea||0,
-    dom: l.daysOnZillow||l.hdpData?.homeInfo?.daysOnZillow||0,
-    url: l.detailUrl||l.hdpUrl||''
+    address: l.street_address||l.streetAddress||l.address||'N/A',
+    city: l.city||'N/A',
+    state: l.state||'AL',
+    zip: l.zipcode||l.zip||'',
+    price: l.price||0,
+    beds: l.beds||l.bedrooms||0,
+    baths: l.baths||l.bathrooms||0,
+    sqft: l.sqft||l.livingArea||0,
+    dom: l.days_on_zillow||l.daysOnZillow||0,
+    type: l.home_type||l.homeType||'',
+    status: l.status_text||l.status||''
   })).filter(l=>l.price>0&&l.address!=='N/A');
 
   if(!cleaned.length) throw new Error('Los listings de Zillow no tienen formato esperado. Intenta de nuevo.');
