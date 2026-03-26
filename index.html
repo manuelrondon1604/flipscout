@@ -400,19 +400,6 @@ function getCountyStyle(city, state){
   if(state==='GA') return {bg:'#fef3e2', border:'#e8a020', text:'#7a4a00', label:`${city}, GA`, arvSqft:155, zone:'GA-Sur'};
   return {bg:'#e8f5ee', border:'#1a6b3c', text:'#0a3a1e', label:`${city}, AL`, arvSqft:105, zone:'AL'};
 }
-  both:{zone:'Prattville AL, Montgomery AL, Atlanta GA',maxPrice:180000,minARV:160000,label:'AL · GA'},
-  alabama:{zone:'Prattville AL, Montgomery AL',maxPrice:120000,minARV:130000,label:'Alabama'},
-  georgia:{zone:'Atlanta GA, East Point GA, College Park GA, Decatur GA',maxPrice:250000,minARV:220000,label:'Atlanta, GA'}
-};
-function setMarket(key,btn){
-  document.querySelectorAll('.market-tab').forEach(t=>t.classList.remove('active'));
-  btn.classList.add('active');
-  const m=MARKETS[key];
-  document.getElementById('zone').value=m.zone;
-  document.getElementById('maxPrice').value=m.maxPrice;
-  document.getElementById('minARV').value=m.minARV;
-  document.getElementById('active-market-label').textContent=m.label;
-}
 
 // Search
 async function startSearch(){
@@ -436,9 +423,9 @@ async function startSearch(){
   ];
   for(const[label,pct] of steps){setProgressStep(label);setProgressPct(pct);await delay(550+Math.random()*350);}
   try{
-    const deals=await fetchDeals(criteria);
-    allDeals=deals;
-    renderDeals(deals);
+    const deals = await fetchDeals(criteria);
+    allDeals = deals;
+    await renderDeals(deals);
     updateStats(deals);
     document.getElementById('stats-bar').classList.add('show');
     document.getElementById('results-header').classList.add('show');
