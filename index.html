@@ -214,11 +214,11 @@ header { display: flex; align-items: center; justify-content: space-between; mar
     <div class="api-banner-icon">🔑</div>
     <div class="api-banner-text">
       <strong>Conectar datos reales de Zillow</strong>
-      <span>Pega tu X-RapidAPI-Key · Zillow Real Estate API by Data Forge</span>
+      <span>Pega tu X-RapidAPI-Key · RapidAPI</span>
     </div>
     <div class="api-key-row">
-      <input type="password" id="apiKeyInput" placeholder="Pega tu X-RapidAPI-Key aquí..." autocomplete="off">
-      <button class="btn-connect" onclick="connectAPI()">Conectar</button>
+      <input type="text" id="apiKeyInput" placeholder="Pega tu X-RapidAPI-Key aquí..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" oninput="onKeyInput(this.value)" onpaste="setTimeout(()=>autoConnect(),100)">
+      <button class="btn-connect" id="connectBtn" onclick="connectAPI()">Conectar</button>
     </div>
     <div class="connected-badge" id="connected-badge">✓ Zillow Live</div>
   </div>
@@ -322,27 +322,51 @@ updateClock();setInterval(updateClock,1000);
 let allDeals=[],currentSort='score',activeMarketFilter='all';
 let rapidApiKey=localStorage.getItem('fs_rapidapi_key')||'';
 
-window.addEventListener('DOMContentLoaded',()=>{
-  const saved=localStorage.getItem('flipscout_email');
-  if(saved) document.getElementById('email-input').value=saved;
-  if(rapidApiKey) showConnected();
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = localStorage.getItem('flipscout_email');
+  if(saved) document.getElementById('email-input').value = saved;
+  if(rapidApiKey && rapidApiKey.length > 10){
+    // Key already loaded — show connected state silently
+    document.getElementById('api-banner').classList.add('connected');
+    document.getElementById('connected-badge').classList.add('show');
+    document.getElementById('apiKeyInput').placeholder = '✓ Key guardada';
+    document.getElementById('apiKeyInput').disabled = true;
+    document.getElementById('connectBtn').textContent = '✓ Listo';
+    document.getElementById('connectBtn').style.background = 'var(--green)';
+  }
 });
 
 // API Key
-function connectAPI(){
-  const raw=document.getElementById('apiKeyInput').value;
-  // Strip all non-ASCII and invisible characters
-  const key=raw.replace(/[^\x20-\x7E]/g,'').trim();
-  if(!key) return showToast('Pega tu API key primero');
-  rapidApiKey=key;
-  localStorage.setItem('fs_rapidapi_key',key);
-  showConnected();
-  showToast('✓ API key guardada — datos reales de Zillow activados');
+function onKeyInput(val){
+  const btn = document.getElementById('connectBtn');
+  const clean = val.replace(/[^\x20-\x7E]/g,'').trim();
+  btn.style.opacity = clean.length > 10 ? '1' : '0.5';
 }
+
+function autoConnect(){
+  const val = document.getElementById('apiKeyInput').value;
+  const key = val.replace(/[^\x20-\x7E]/g,'').trim();
+  if(key.length > 20) connectAPI();
+}
+
+function connectAPI(){
+  const raw = document.getElementById('apiKeyInput').value;
+  const key = raw.replace(/[^\x20-\x7E]/g,'').trim();
+  if(!key || key.length < 10) return showToast('Pega tu API key primero');
+  rapidApiKey = key;
+  localStorage.setItem('fs_rapidapi_key', key);
+  showConnected();
+  showToast('✓ Conectado — presiona Buscar Deals');
+}
+
 function showConnected(){
   document.getElementById('api-banner').classList.add('connected');
   document.getElementById('connected-badge').classList.add('show');
-  document.getElementById('apiKeyInput').value='••••••••••••••••••••';
+  document.getElementById('apiKeyInput').value = '';
+  document.getElementById('apiKeyInput').placeholder = '✓ Key guardada';
+  document.getElementById('apiKeyInput').disabled = true;
+  document.getElementById('connectBtn').textContent = '✓ Listo';
+  document.getElementById('connectBtn').style.background = 'var(--green)';
 }
 
 // Full Atlanta Metro + Alabama — color coded by subzone
