@@ -428,8 +428,8 @@ async function fetchFromZillow(c){
   return analyzeWithClaude(results,c);
 }
 
-async function analyzeWithClaude(listings,c){
-  const cleaned=listings.map(l=>({
+async function analyzeWithClaude(listings, c){
+  const cleaned = listings.map(l=>({
     address: l.street_address||l.streetAddress||l.address||'N/A',
     city: l.city||'N/A',
     state: l.state||'AL',
@@ -439,32 +439,99 @@ async function analyzeWithClaude(listings,c){
     baths: l.baths||l.bathrooms||0,
     sqft: l.sqft||l.livingArea||0,
     dom: l.days_on_zillow||l.daysOnZillow||0,
-    type: l.home_type||l.homeType||'',
-    status: l.status_text||l.status||''
+    zestimate: l.zestimate||0,
+    status: l.status_text||l.status||'',
+    listing_type: l.listing_type||''
   })).filter(l=>l.price>0&&l.address!=='N/A');
 
-  if(!cleaned.length) throw new Error('Los listings de Zillow no tienen formato esperado. Intenta de nuevo.');
+  if(!cleaned.length) throw new Error('Sin propiedades válidas en la respuesta de Zillow.');
 
-  const prompt=`Analiza estas propiedades reales de Zillow para fix-and-flip en ${c.zone}.
-Criterios: precio máx $${c.maxPrice}, ARV mín $${c.minARV}, ROI mín ${c.minROI}%, beds mín ${c.minBeds}.
-Listings reales: ${JSON.stringify(cleaned)}
-Para cada propiedad calcula: ARV estimado (comps del área), rehab estimado (qué necesita), maxOffer (ARV×0.70−rehab), profitNet, ROI, score 0-100, tag (hot/warm/neutral), insight 1-2 oraciones con contexto local.
-SOLO JSON sin markdown: {"deals":[{"address":"","city":"","state":"AL|GA","zip":"","beds":0,"baths":0,"sqft":0,"listPrice":0,"arv":0,"rehabCost":0,"rehabNotes":"","maxOffer":0,"profitNet":0,"roi":0,"score":0,"tag":"hot|warm|neutral","source":"Zillow (Live)","dom":0,"insight":"","zillowUrl":"https://www.zillow.com/homes/for_sale/"}]}`;
-  const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2500,messages:[{role:'user',content:prompt}]})});
-  const d=await r.json();
-  return JSON.parse(d.content.map(b=>b.text||'').join('').replace(/```json|```/g,'').trim()).deals;
+  // Local analysis — no API needed
+  return cleaned.map(l => {
+    const isGA = l.state==='GA';
+    const isForeclosure = l.listing_type==='BANK_OWNED'||l.status.toLowerCase().includes('foreclosure');
+
+    // ARV: use zestimate if available, else estimate based on market
+    const arvMultiplier = isGA ? 1.35 : 1.25;
+    const arv = l.zestimate>0 ? Math.round(l.zestimate*1.05) : Math.round(l.price*arvMultiplier);
+
+    // Rehab estimate based on sqft and property type
+    const rehabPerSqft = isForeclosure ? 45 : 28;
+    const rehabCost = Math.round((l.sqft||1500) * rehabPerSqft / 1000) * 1000;
+
+    // 70% rule
+    const maxOffer = Math.round(arv * 0.70 - rehabCost);
+    const profitNet = Math.round(arv - l.price - rehabCost - (arv*0.08)); // minus 8% closing/carrying
+    const roi = arv>0 ? Math.round((profitNet/(l.price+rehabCost))*100) : 0;
+
+    // Scoring
+    const spread = maxOffer - l.price;
+    let score = 50;
+    if(spread > 20000) score += 20;
+    else if(spread > 0) score += 10;
+    else score -= 20;
+    if(isForeclosure) score += 10;
+    if(l.dom > 30) score += 8;
+    if(roi >= 20) score += 15;
+    else if(roi >= 15) score += 8;
+    else if(roi < 10) score -= 15;
+    if(l.price <= c.maxPrice*0.8) score += 7;
+    score = Math.min(98, Math.max(10, score));
+
+    const tag = score>=80?'hot':score>=60?'warm':'neutral';
+
+    // Rehab notes
+    const rehabNotes = isForeclosure
+      ? 'Foreclosure — probablemente necesita cocina, baños, pisos y pintura completa'
+      : l.dom>60
+        ? 'En mercado largo — puede necesitar actualización de cocina y baños'
+        : 'Cosmético — pintura, pisos, fixtures, landscape';
+
+    // Insight
+    let insight = '';
+    if(spread > 20000) insight = `Precio bajo el max oferta por $${fmt(spread)} — buen margen de negociación.`;
+    else if(spread > 0) insight = `Precio ligeramente bajo el max oferta. Deal posible si negocias.`;
+    else insight = `Precio sobre el max oferta por $${fmt(Math.abs(spread))}. Solo viable si el ARV real es mayor.`;
+    if(isForeclosure) insight += ' Propiedad bancaria — potencial para oferta agresiva.';
+
+    return {
+      address: l.address,
+      city: l.city,
+      state: l.state,
+      zip: l.zip,
+      beds: l.beds,
+      baths: l.baths,
+      sqft: l.sqft,
+      listPrice: l.price,
+      arv,
+      rehabCost,
+      rehabNotes,
+      maxOffer,
+      profitNet,
+      roi,
+      score,
+      tag,
+      source: 'Zillow (Live)',
+      dom: l.dom,
+      insight,
+      zillowUrl: `https://www.zillow.com/homes/${encodeURIComponent(l.address)}_rb/`
+    };
+  });
 }
 
 async function fetchFromClaude(c){
-  const multi=c.zone.toLowerCase().includes('al')&&c.zone.toLowerCase().includes('ga');
-  const prompt=`Eres experto en fix-and-flip en Alabama y Atlanta GA. Genera 6 propiedades realistas para: ${c.zone}
-Criterios: precio máx $${c.maxPrice}, ARV mín $${c.minARV}, beds mín ${c.minBeds}, tipo ${c.propType}, ROI mín ${c.minROI}%
-${multi?'3 propiedades de Alabama (Montgomery/Prattville, lista $70-130k) y 3 de Atlanta metro (East Point/College Park, lista $150-280k).':''}
-Precios coherentes con mercado real 2025. Calcula ARV, rehab específico, maxOffer (ARV×0.70−rehab), profit, ROI, score 0-100, tag, insight.
-SOLO JSON: {"deals":[{"address":"","city":"","state":"AL|GA","zip":"","beds":0,"baths":0,"sqft":0,"listPrice":0,"arv":0,"rehabCost":0,"rehabNotes":"","maxOffer":0,"profitNet":0,"roi":0,"score":0,"tag":"hot|warm|neutral","source":"Zillow|MLS|Wholesaler","dom":0,"insight":"","zillowUrl":"https://www.zillow.com/homes/for_sale/"}]}`;
-  const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2500,messages:[{role:'user',content:prompt}]})});
-  const d=await r.json();
-  return JSON.parse(d.content.map(b=>b.text||'').join('').replace(/```json|```/g,'').trim()).deals;
+  // Demo mode — local calculation with realistic market data
+  const isMulti = c.zone.toLowerCase().includes('al')&&c.zone.toLowerCase().includes('ga');
+  const demos = [
+    {street:'1245 Pine St',city:'Prattville',state:'AL',zip:'36066',price:89000,beds:3,baths:2,sqft:1450,dom:45,zestimate:0,status:'Foreclosure',listing_type:'BANK_OWNED'},
+    {street:'834 Oak Ave',city:'Montgomery',state:'AL',zip:'36109',price:105000,beds:3,baths:2,sqft:1680,dom:12,zestimate:118000,status:'House for sale',listing_type:'FSBA'},
+    {street:'2201 Maple Dr',city:'Prattville',state:'AL',zip:'36067',price:72000,beds:3,baths:1,sqft:1320,dom:78,zestimate:0,status:'Foreclosure',listing_type:'BANK_OWNED'},
+    {street:'445 Peachtree Rd NE',city:'Atlanta',state:'GA',zip:'30308',price:195000,beds:3,baths:2,sqft:1550,dom:22,zestimate:225000,status:'House for sale',listing_type:'FSBA'},
+    {street:'112 Glenwood Ave SE',city:'Atlanta',state:'GA',zip:'30316',price:175000,beds:3,baths:1,sqft:1280,dom:60,zestimate:0,status:'Foreclosure',listing_type:'BANK_OWNED'},
+    {street:'678 Flat Shoals Ave',city:'Atlanta',state:'GA',zip:'30316',price:210000,beds:4,baths:2,sqft:1820,dom:8,zestimate:248000,status:'House for sale',listing_type:'FSBA'},
+  ];
+  const filtered = isMulti ? demos : demos.filter(d=>d.state===(c.zone.includes('GA')?'GA':'AL'));
+  return analyzeWithClaude(filtered.map(d=>({...d, street_address:d.street, address:`${d.street}, ${d.city}, ${d.state} ${d.zip}`})), c);
 }
 
 // Render
