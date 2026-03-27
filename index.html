@@ -221,6 +221,7 @@ header{display:flex;align-items:center;justify-content:space-between;margin-bott
   <button class="btn-search" id="searchBtn" onclick="startSearch()">⚡ Buscar Deals</button>
   <button class="btn-outline" onclick="analystHistory=[];openAnalyst('')">🤖 Analista IA</button>
   <button class="btn-outline" onclick="openEmailModal()">✉ Alerta Email</button>
+  <button class="btn-outline" id="blacklist-btn" onclick="if(confirm('¿Limpiar todas las propiedades descartadas?'))clearBlacklist()" style="display:none;color:var(--hot);border-color:#f0c0bc">🚫 <span id="blacklist-count">0</span> descartadas</button>
   <div class="status-chip">
     <div class="status-dot" id="status-dot"></div>
     <span id="status-text">Listo</span>
@@ -369,6 +370,53 @@ function getCounty(city, state) {
 // ═══════════════════════════════════════════════════════════
 let allDeals = [], currentSort = 'score', activeFilter = 'all';
 let rapidApiKey = localStorage.getItem('fs_rapidapi_key') || '';
+let blacklist = new Set(JSON.parse(localStorage.getItem('fs_blacklist') || '[]'));
+
+// ── Blacklist helpers ──
+function blacklistKey(d) {
+  // Use address as key — stable across searches
+  return (d.address || d.url || '').toLowerCase().trim();
+}
+
+function blacklistDeal(i) {
+  const d = sortList(allDeals, currentSort)[i];
+  const key = blacklistKey(d);
+  blacklist.add(key);
+  localStorage.setItem('fs_blacklist', JSON.stringify([...blacklist]));
+  // Remove card with animation
+  const cards = document.querySelectorAll('.deal-card');
+  if (cards[i]) {
+    cards[i].style.transition = 'opacity .3s, transform .3s';
+    cards[i].style.opacity = '0';
+    cards[i].style.transform = 'translateX(40px)';
+    setTimeout(() => {
+      allDeals = allDeals.filter(deal => blacklistKey(deal) !== key);
+      renderDeals(allDeals);
+      updateStats(allDeals);
+      updateBlacklistBtn();
+      showToast('🚫 Propiedad descartada — no volverá a aparecer');
+    }, 300);
+  }
+}
+
+function clearBlacklist() {
+  blacklist = new Set();
+  localStorage.removeItem('fs_blacklist');
+  updateBlacklistBtn();
+  showToast('✓ Blacklist limpiada — las propiedades volverán a aparecer');
+}
+
+function updateBlacklistBtn() {
+  const count = blacklist.size;
+  const btn = document.getElementById('blacklist-btn');
+  if (!btn) return;
+  if (count > 0) {
+    btn.style.display = 'flex';
+    document.getElementById('blacklist-count').textContent = count;
+  } else {
+    btn.style.display = 'none';
+  }
+}
 
 // ═══════════════════════════════════════════════════════════
 // INIT
@@ -383,6 +431,7 @@ window.addEventListener('DOMContentLoaded', () => {
   if (e) document.getElementById('email-input').value = e;
   if (rapidApiKey.length > 10) markConnected();
   updateZonesCount();
+  updateBlacklistBtn();
 });
 
 function updateZonesCount() {
@@ -452,7 +501,9 @@ async function startSearch() {
       ? await searchLive(crit)
       : await searchDemo(crit);
 
-    allDeals = deals;
+    // Remove blacklisted properties
+    const filtered = deals.filter(d => !blacklist.has(blacklistKey(d)));
+    allDeals = filtered;
     renderDeals(deals);
     updateStats(deals);
     ['stats-bar','results-header'].forEach(id =>
@@ -589,6 +640,16 @@ async function fetchZone(zone, crit) {
           const beds = l.beds || l.bedrooms || 0;
           if (beds > 0 && beds < 3) return false;
 
+          // Price/sqft floor — catches manufactured homes misclassified as SFR
+          // GA FC/Auction: floor $42/sqft (real distressed stick-built)
+          // GA FSBO/MLS: floor $55/sqft (traila FSBOs cluster at $45-52/sqft)
+          // AL: floor $38/sqft (cheap labor market, genuine low values)
+          const ppsf = sqft > 0 ? price / sqft : 999;
+          const ltype_raw = (l.listing_type || '').toUpperCase();
+          const isFC = ['BANK_OWNED','AUCTION','REO'].includes(ltype_raw);
+          const minPsf = isGA ? (isFC ? 42 : 55) : 38;
+          if (sqft > 0 && ppsf < minPsf) return false;
+
           return true;
         }).slice(0, 4)
       : [];
@@ -642,6 +703,12 @@ function analyzeListings(raw, crit) {
 
     // ── Minimum 2 baths ──
     if (l.baths > 0 && l.baths < 2) return false;
+
+    // ── Price/sqft floor — catches manufactured homes misclassified as SFR ──
+    const ppsf = l.sqft > 0 ? l.price / l.sqft : 999;
+    const isFC_type = ['BANK_OWNED','AUCTION','REO'].includes(l.ltype);
+    const minPsf = l.state === 'GA' ? (isFC_type ? 42 : 55) : 38;
+    if (l.sqft > 0 && ppsf < minPsf) return false;
 
     return true;
   });
@@ -937,6 +1004,7 @@ function renderDeals(deals) {
     <button class="card-action-btn" onclick="analyzeWithAI(${i})">🤖 Analizar con IA</button>
     <button class="card-action-btn" onclick="copyDeal(${i})">📋 Copiar</button>
     <button class="card-action-btn" onclick="shareDeal(${i})">↗ Compartir</button>
+    <button class="card-action-btn" onclick="blacklistDeal(${i})" style="margin-left:auto;color:var(--hot);border-color:#f0c0bc" title="No volver a mostrar esta propiedad">🚫 Descartar</button>
   </div>
 </div>`;
   }).join('');
