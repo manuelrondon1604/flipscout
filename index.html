@@ -553,6 +553,20 @@ async function fetchZone(zone, crit) {
     }
     const list = d?.data?.results || d?.results || d?.props || (Array.isArray(d) ? d : []);
 
+    // DEBUG — log first 3 raw results to console
+    if (Array.isArray(list) && list.length) {
+      console.log('RAW ZILLOW SAMPLE from', zone, ':');
+      list.slice(0,3).forEach(l => console.log(JSON.stringify({
+        address: l.address || l.street_address,
+        price: l.price,
+        home_type: l.home_type || l.homeType || l.property_type,
+        listing_type: l.listing_type,
+        sqft: l.sqft || l.livingArea,
+        beds: l.beds || l.bedrooms,
+        status: l.status || l.status_text,
+      })));
+    }
+
     // Hard filter: SFR only — exclude mobile, condo, townhouse, multi, land
     const SFR_TYPES = ['SINGLE_FAMILY','SingleFamily','single_family','House'];
     const BAD_TYPES = ['MOBILE','MANUFACTURED','CONDO','TOWNHOUSE','MULTI_FAMILY',
