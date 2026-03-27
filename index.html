@@ -219,6 +219,7 @@ header{display:flex;align-items:center;justify-content:space-between;margin-bott
 
 <div class="action-row">
   <button class="btn-search" id="searchBtn" onclick="startSearch()">⚡ Buscar Deals</button>
+  <button class="btn-outline" onclick="analystHistory=[];openAnalyst('')">🤖 Analista IA</button>
   <button class="btn-outline" onclick="openEmailModal()">✉ Alerta Email</button>
   <div class="status-chip">
     <div class="status-dot" id="status-dot"></div>
@@ -873,6 +874,7 @@ function renderDeals(deals) {
 
   <div class="card-actions">
     <a class="card-action-btn primary" href="${d.url}" target="_blank">Ver en Zillow →</a>
+    <button class="card-action-btn" onclick="analyzeWithAI(${i})">🤖 Analizar con IA</button>
     <button class="card-action-btn" onclick="copyDeal(${i})">📋 Copiar</button>
     <button class="card-action-btn" onclick="shareDeal(${i})">↗ Compartir</button>
   </div>
@@ -976,6 +978,248 @@ function saveEmail() {
   closeEmailModal();
   showToast('✓ Alerta guardada para ' + e);
 }
+
+// ═══════════════════════════════════════════════════════════
+// AI ANALYST — RONDON LLC SYSTEM PROMPT
+// Full deal analysis via Claude API
+// ═══════════════════════════════════════════════════════════
+const RONDON_SYSTEM_PROMPT = `You are a real estate investment analyst for Rondon LLC, a fix-and-flip company operating in Montgomery AL, Prattville AL, and Metro Atlanta GA. Your job is to pre-filter and analyze investment properties using strict criteria.
+
+## INSTANT DISQUALIFY — Stop and say DISCARD if any apply:
+- Manufactured home / mobile home / modular home
+- Condo or townhome
+- Property on leased land or lot rent community
+- Less than 3 bedrooms or less than 2 FULL bathrooms
+- Less than 1,100 sqft
+- Single bathroom only
+- ZIP codes in Montgomery AL: 36108, 36107, 36110, 36105
+- Sub-zones: Forest Park (36106), Hackberry/Matterhorn/Sunshine Dr area (36116)
+- ARV ceiling under $150K for flip
+- Crime score F or F+
+
+## TARGET MARKETS:
+- Montgomery AL: ZIPs 36111, 36109, 36106 (Cloverdale north only)
+- Prattville AL: ZIPs 36066, 36067
+- Metro Atlanta GA: Jonesboro 30236, Lithonia 30038, Conyers 30012, Acworth 30102
+
+## PROPERTY REQUIREMENTS (Georgia):
+- Single family only — stick-built (brick, frame, or block)
+- Owner owns the land (no lot lease)
+- Minimum 3 bed / 2 full bath / 1,100 sqft
+- ARV must support $40,000+ net profit
+
+## FINANCIAL MODEL:
+- Minimum net profit: $40,000
+- MAO = (ARV × 0.70) − adjusted rehab
+- Rehab costs: distressed $45/sqft · poor $32/sqft · fair $18/sqft
+- Alabama subcontractor discounts: roofing −80%, plumbing/electrical −50%, others full price
+- Closing costs: purchase 3% · sale 8%
+- Holding costs: $8,000 (75 days) or $16,000 (120 days cold market)
+- ARV by specific sub-neighborhood, NOT just ZIP
+
+## ANALYSIS WORKFLOW:
+1. Run instant disqualify checklist — if triggered, STOP: say DISCARD + reason
+2. Confirm property type and active status
+3. Use listing price provided by user
+4. Estimate ARV using sub-neighborhood comps (sold within 1 mile / 6 months / same bed-bath / renovated)
+5. Calculate rehab tier: distressed / poor / fair
+6. Calculate MAO and compare to listing price
+7. Note any crime or location red flags
+8. Deliver verdict with full math shown
+
+## VERDICTS:
+- STRONG PROCEED: $40K+ net in moderate scenario, numbers close clearly
+- PROCEED PENDING INSPECTION: Numbers close in moderate/optimistic, needs physical check
+- BORDERLINE: Numbers close only in optimistic or need price negotiation
+- DISCARD: Doesn't close in any scenario or instant disqualify triggered
+
+## RULES:
+- Always show the math explicitly
+- Flag red flags directly
+- Respond in the same language the user writes in (Spanish or English)
+- Be direct and precise — no filler
+- If a value is unknown, state a reasonable estimate and flag it as estimated`;
+
+let analystHistory = [];
+
+function openAnalyst(prefill) {
+  document.getElementById('analyst-modal').classList.add('open');
+  if (prefill) {
+    document.getElementById('analyst-input').value = prefill;
+  }
+  document.getElementById('analyst-input').focus();
+}
+function closeAnalyst() {
+  document.getElementById('analyst-modal').classList.remove('open');
+}
+
+async function sendAnalystMessage() {
+  const input = document.getElementById('analyst-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  input.style.height = 'auto';
+
+  appendAnalystMsg('user', msg);
+  analystHistory.push({ role:'user', content: msg });
+
+  const thinkingId = appendAnalystThinking();
+  document.getElementById('analyst-send').disabled = true;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: RONDON_SYSTEM_PROMPT,
+        messages: analystHistory,
+      }),
+    });
+    const data = await res.json();
+    const reply = data.content?.map(b => b.text||'').join('') || 'Sin respuesta.';
+    removeThinking(thinkingId);
+    appendAnalystMsg('assistant', reply);
+    analystHistory.push({ role:'assistant', content: reply });
+  } catch(e) {
+    removeThinking(thinkingId);
+    appendAnalystMsg('assistant', '⚠ Error conectando con el análisis. Intenta de nuevo.');
+  }
+  document.getElementById('analyst-send').disabled = false;
+}
+
+function appendAnalystMsg(role, text) {
+  const wrap = document.getElementById('analyst-messages');
+  const div = document.createElement('div');
+  div.className = `amsg amsg-${role}`;
+  // Format markdown-like text
+  const formatted = text
+    .replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>')
+    .replace(/^#{1,3} (.+)$/gm,'<div class="amsg-heading">$1</div>')
+    .replace(/^- (.+)$/gm,'<div class="amsg-li">· $1</div>')
+    .replace(/\n/g,'<br>');
+  div.innerHTML = formatted;
+  wrap.appendChild(div);
+  wrap.scrollTop = wrap.scrollHeight;
+  return div;
+}
+
+function appendAnalystThinking() {
+  const wrap = document.getElementById('analyst-messages');
+  const id = 'thinking-' + Date.now();
+  const div = document.createElement('div');
+  div.id = id;
+  div.className = 'amsg amsg-thinking';
+  div.innerHTML = '<span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span>';
+  wrap.appendChild(div);
+  wrap.scrollTop = wrap.scrollHeight;
+  return id;
+}
+
+function removeThinking(id) {
+  const el = document.getElementById(id);
+  if (el) el.remove();
+}
+
+function analyzeWithAI(dealIndex) {
+  const d = sortList(allDeals, currentSort)[dealIndex];
+  const msg = `Analiza esta propiedad para RONDON LLC:
+
+Dirección: ${d.address}
+Precio de lista: $${fmt(d.listPrice)}
+Bedrooms: ${d.beds} | Bathrooms: ${d.baths} | Sqft: ${d.sqft||'N/A'}
+Año construcción: ${d.yr||'N/A'}
+Tipo de listing: ${d.ltype||'MLS'}
+Días en mercado: ${d.dom}
+Zestimate: ${d.arv ? '$'+fmt(d.arv) : 'No disponible'}
+Renta estimada: ${d.rent ? '$'+fmt(d.rent)+'/mo' : 'N/A'}
+URL: ${d.url}`;
+
+  analystHistory = [];
+  openAnalyst(msg);
+}
+
+// Auto-resize textarea
+document.addEventListener('DOMContentLoaded', () => {
+  const ta = document.getElementById('analyst-input');
+  if (ta) {
+    ta.addEventListener('input', () => {
+      ta.style.height = 'auto';
+      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+    });
+    ta.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendAnalystMessage();
+      }
+    });
+  }
+});
 </script>
+
+<!-- AI Analyst Modal -->
+<div class="modal-overlay" id="analyst-modal" onclick="if(event.target===this)closeAnalyst()">
+  <div class="analyst-panel">
+    <div class="analyst-header">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="width:32px;height:32px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px">🤖</div>
+        <div>
+          <div style="font-weight:800;font-size:14px;font-family:var(--display)">Analista IA — RONDON LLC</div>
+          <div style="font-size:11px;color:var(--muted);font-family:var(--mono)">Modelo financiero completo · Regla del 70% · MAO</div>
+        </div>
+      </div>
+      <button onclick="closeAnalyst()" style="background:none;border:none;cursor:pointer;font-size:20px;color:var(--muted);padding:4px">✕</button>
+    </div>
+    <div class="analyst-messages" id="analyst-messages">
+      <div class="amsg amsg-assistant">
+        <strong>Analista RONDON LLC listo.</strong><br><br>
+        Pega una dirección o describe la propiedad y la analizo completa:<br>
+        · Disqualify checklist<br>
+        · ARV por sub-vecindario<br>
+        · Rehab estimado<br>
+        · MAO = (ARV × 70%) − rehab<br>
+        · Veredicto: STRONG PROCEED / PROCEED / BORDERLINE / DISCARD
+      </div>
+    </div>
+    <div class="analyst-input-row">
+      <textarea id="analyst-input" placeholder="Pega una dirección o datos de la propiedad... (Enter para enviar)" rows="2"></textarea>
+      <button id="analyst-send" onclick="sendAnalystMessage()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<style>
+/* Analyst Modal */
+#analyst-modal{align-items:flex-end;padding:0}
+@media(min-width:640px){#analyst-modal{align-items:center;padding:20px}}
+
+.analyst-panel{background:var(--surface);border-radius:16px 16px 0 0;width:100%;max-width:680px;height:85vh;display:flex;flex-direction:column;box-shadow:0 -4px 40px rgba(0,0,0,.15);overflow:hidden}
+@media(min-width:640px){.analyst-panel{border-radius:16px;height:80vh}}
+
+.analyst-header{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid var(--border);flex-shrink:0}
+
+.analyst-messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;scroll-behavior:smooth}
+
+.amsg{max-width:90%;padding:12px 14px;border-radius:12px;font-size:13px;line-height:1.65}
+.amsg-user{background:var(--accent);color:#fff;align-self:flex-end;border-radius:12px 12px 3px 12px;font-size:13px}
+.amsg-assistant{background:var(--surface2);border:1px solid var(--border);align-self:flex-start;border-radius:3px 12px 12px 12px;max-width:95%}
+.amsg-heading{font-family:var(--display);font-weight:800;font-size:13px;margin:8px 0 4px;color:var(--text)}
+.amsg-li{color:var(--text2);padding-left:4px;margin:2px 0}
+.amsg-thinking{background:var(--surface2);border:1px solid var(--border);align-self:flex-start;padding:14px 18px;border-radius:3px 12px 12px 12px;display:flex;gap:5px;align-items:center}
+.thinking-dot{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:tdot 1.2s infinite}
+.thinking-dot:nth-child(2){animation-delay:.2s}
+.thinking-dot:nth-child(3){animation-delay:.4s}
+@keyframes tdot{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-6px)}}
+
+.analyst-input-row{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--border);align-items:flex-end;flex-shrink:0;background:var(--surface)}
+.analyst-input-row textarea{flex:1;background:var(--surface2);border:1.5px solid var(--border);border-radius:10px;padding:9px 12px;font-family:var(--font);font-size:13px;color:var(--text);outline:none;resize:none;transition:border-color .2s;line-height:1.5}
+.analyst-input-row textarea:focus{border-color:var(--accent)}
+.analyst-input-row button{width:40px;height:40px;background:var(--accent);color:#fff;border:none;border-radius:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .2s}
+.analyst-input-row button:hover{background:#155a32}
+.analyst-input-row button:disabled{background:var(--border2);cursor:not-allowed}
+</style>
 </body>
 </html>
