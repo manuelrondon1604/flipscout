@@ -502,8 +502,8 @@ async function searchLive(crit) {
   setProgressStep('Consultando Zillow...');
   setProgressZones(`0 / ${zones.length}`);
 
-  // Batch 4 zones concurrently — faster, still respects rate limits
-  const BATCH = 4;
+  // Batch 2 zones concurrently — avoids 429 rate limit (3 req/sec plan)
+  const BATCH = 2;
   for (let i = 0; i < zones.length; i += BATCH) {
     const batch = zones.slice(i, i + BATCH);
     const results = await Promise.allSettled(batch.map(z => fetchZone(z, crit)));
@@ -516,6 +516,8 @@ async function searchLive(crit) {
     searched += batch.length;
     setProgressZones(`${Math.min(searched, zones.length)} / ${zones.length}`);
     setProgressPct(Math.round((searched / zones.length) * 75));
+    // Small pause between batches to respect rate limit
+    if (i + BATCH < zones.length) await delay(500);
   }
 
   if (quotaHit) showAlert('⚠ Cupo de Zillow agotado este mes (Basic = 500 req/mes). Reinicia el 1 de cada mes. Mostrando resultados parciales.');
@@ -555,47 +557,37 @@ async function fetchZone(zone, crit) {
     }
     const list = d?.data?.results || d?.results || d?.props || (Array.isArray(d) ? d : []);
 
-    // DEBUG — log first 3 raw results to console
-    if (Array.isArray(list) && list.length) {
-      console.log('RAW ZILLOW SAMPLE from', zone, ':');
-      list.slice(0,3).forEach(l => console.log(JSON.stringify({
-        address: l.address || l.street_address,
-        price: l.price,
-        home_type: l.home_type || l.homeType || l.property_type,
-        listing_type: l.listing_type,
-        sqft: l.sqft || l.livingArea,
-        beds: l.beds || l.bedrooms,
-        status: l.status || l.status_text,
-      })));
-    }
-
     // Hard filter: SFR only — exclude mobile, condo, townhouse, multi, land
     const SFR_TYPES = ['SINGLE_FAMILY','SingleFamily','single_family','House'];
     const BAD_TYPES = ['MOBILE','MANUFACTURED','CONDO','TOWNHOUSE','MULTI_FAMILY',
                        'APARTMENT','LAND','LOT','COOPERATIVE','mobile','condo',
                        'townhouse','manufactured','multi'];
+    const BAD_ZIPS_AL = ['36108','36107','36110','36105','36104'];
 
     const valid = Array.isArray(list)
       ? list.filter(l => {
           const price = l.price || 0;
           if (price <= 0 || price > maxP) return false;
 
-          // Check property type fields
+          // Exclude bad Montgomery ZIPs
+          const zip = (l.zipcode || l.zip || '').toString();
+          if (BAD_ZIPS_AL.includes(zip)) return false;
+
+          // Check property type
           const htype = (l.home_type || l.homeType || l.property_type || l.propertyType || '').toString();
           if (BAD_TYPES.some(t => htype.toLowerCase().includes(t.toLowerCase()))) return false;
-          if (SFR_TYPES.length && htype && !SFR_TYPES.some(t => htype.toLowerCase().includes(t.toLowerCase()))) {
-            // Unknown type — check listing description for red flags
-            const desc = (l.address || '').toLowerCase();
-            if (/mobile|trailer|lot\s*\d+|unit\s*\d+|#\d+/.test(desc)) return false;
-          }
 
-          // Sqft filter — no trailers (usually under 900 sqft)
+          // Address red flags
+          const addr = (l.address || '').toLowerCase();
+          if (/mobile|trailer|lot\s*\d+|unit\s*#?\d+|manufactured/.test(addr)) return false;
+
+          // Min sqft 1,100
           const sqft = l.sqft || l.livingArea || 0;
-          if (sqft > 0 && sqft < 900) return false;
+          if (sqft > 0 && sqft < 1100) return false;
 
-          // Beds filter
+          // Min 3 beds
           const beds = l.beds || l.bedrooms || 0;
-          if (beds > 0 && beds < 2) return false;
+          if (beds > 0 && beds < 3) return false;
 
           return true;
         }).slice(0, 4)
@@ -628,18 +620,29 @@ function analyzeListings(raw, crit) {
     rent:    l.rent_zestimate || 0,
     status:  (l.status_text || l.status || '').toLowerCase(),
     ltype:   l.listing_type || '',
-    htype:   l.home_type || l.homeType || l.property_type || l.propertyType || '',
+    htype:   (l.home_type || l.homeType || l.property_type || l.propertyType || 'SINGLE_FAMILY').toString(),
     url:     l.detail_url || l.detailUrl || 'https://www.zillow.com/homes/for_sale/',
     yr:      l.year_built || l.yearBuilt || 0,
   })).filter(l => {
     if (l.price <= 0 || l.address === 'N/A') return false;
-    // SFR filter — hard exclude mobile, condo, townhouse, multi-family, land
-    const type = (l.htype + ' ' + l.ltype + ' ' + l.address).toLowerCase();
-    if (/mobile|manufactured|trailer|modular|condo|townhouse|townhome|multi.?family|apartment|lot\s*\d+|unit\s*#?\d+/.test(type)) return false;
-    // Min sqft
-    if (l.sqft > 0 && l.sqft < 900) return false;
-    // Min beds
-    if (l.beds > 0 && l.beds < 2) return false;
+
+    // ── Excluded Montgomery AL ZIP codes ──
+    const BAD_ZIPS = ['36108','36107','36110','36105','36104'];
+    if (BAD_ZIPS.includes(l.zip)) return false;
+
+    // ── SFR only — exclude mobile, condo, townhouse, multi, land ──
+    const typeStr = (l.htype + ' ' + l.ltype + ' ' + l.address).toLowerCase();
+    if (/mobile|manufactured|trailer|modular|condo|townhouse|townhome|multi.?family|apartment|lot\s*\d+|unit\s*#?\d+/.test(typeStr)) return false;
+
+    // ── Minimum sqft 1,100 ──
+    if (l.sqft > 0 && l.sqft < 1100) return false;
+
+    // ── Minimum 3 beds ──
+    if (l.beds > 0 && l.beds < 3) return false;
+
+    // ── Minimum 2 baths ──
+    if (l.baths > 0 && l.baths < 2) return false;
+
     return true;
   });
 
@@ -761,8 +764,8 @@ function analyzeListings(raw, crit) {
       listPrice:l.price, arv, arvConf, rehab, rehabDesc,
       maxOffer, spread, profit, roi, closing,
       targetPrice, negoNeeded,
-      score, tag, dom:l.dom, ltype:l.ltype, rent:l.rent,
-      insight, url:l.url, passes,
+      score, tag, dom:l.dom, ltype:l.ltype, htype:l.htype,
+      zest:l.zest, rent:l.rent, insight, url:l.url, passes,
     };
   })
   .filter(d => d.passes)
@@ -784,23 +787,23 @@ async function searchDemo(crit) {
 
   const demos = [
     // ── Alabama ──
-    {address:'1847 W Main St, Prattville, AL 36067',      city:'Prattville', state:'AL',zip:'36067',price:58000, beds:3,baths:1,sqft:1320,days_on_zillow:62, zestimate:0,      rent_zestimate:980,  status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1978},
-    {address:'3214 Carter Hill Rd, Prattville, AL 36066', city:'Prattville', state:'AL',zip:'36066',price:62000, beds:3,baths:1,sqft:1450,days_on_zillow:45, zestimate:0,      rent_zestimate:1020, status:'Auction',     listing_type:'AUCTION',    year_built:1974},
-    {address:'508 Fernway Dr, Montgomery, AL 36111',      city:'Montgomery', state:'AL',zip:'36111',price:68000, beds:3,baths:2,sqft:1560,days_on_zillow:31, zestimate:0,      rent_zestimate:1100, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1981},
-    {address:'2109 Mobile Hwy, Prattville, AL 36067',     city:'Prattville', state:'AL',zip:'36067',price:74000, beds:3,baths:2,sqft:1680,days_on_zillow:88, zestimate:0,      rent_zestimate:1150, status:'House for sale',listing_type:'FSBA',      year_built:1969},
-    {address:'712 Woodley Rd, Montgomery, AL 36116',      city:'Montgomery', state:'AL',zip:'36116',price:81000, beds:4,baths:2,sqft:1820,days_on_zillow:14, zestimate:0,      rent_zestimate:1200, status:'For sale by owner',listing_type:'FSBO',   year_built:1992},
+    {address:'1847 W Main St, Prattville, AL 36067',      city:'Prattville', state:'AL',zip:'36067',price:58000, beds:3,baths:1,sqft:1320,days_on_zillow:62, zestimate:0,      rent_zestimate:980,  status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1978, home_type:'SINGLE_FAMILY'},
+    {address:'3214 Carter Hill Rd, Prattville, AL 36066', city:'Prattville', state:'AL',zip:'36066',price:62000, beds:3,baths:1,sqft:1450,days_on_zillow:45, zestimate:0,      rent_zestimate:1020, status:'Auction',     listing_type:'AUCTION',    year_built:1974, home_type:'SINGLE_FAMILY'},
+    {address:'508 Fernway Dr, Montgomery, AL 36111',      city:'Montgomery', state:'AL',zip:'36111',price:68000, beds:3,baths:2,sqft:1560,days_on_zillow:31, zestimate:0,      rent_zestimate:1100, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1981, home_type:'SINGLE_FAMILY'},
+    {address:'2109 Mobile Hwy, Prattville, AL 36067',     city:'Prattville', state:'AL',zip:'36067',price:74000, beds:3,baths:2,sqft:1680,days_on_zillow:88, zestimate:0,      rent_zestimate:1150, status:'House for sale',listing_type:'FSBA',      year_built:1969, home_type:'SINGLE_FAMILY'},
+    {address:'712 Woodley Rd, Montgomery, AL 36116',      city:'Montgomery', state:'AL',zip:'36116',price:81000, beds:4,baths:2,sqft:1820,days_on_zillow:14, zestimate:0,      rent_zestimate:1200, status:'For sale by owner',listing_type:'FSBO',   year_built:1992, home_type:'SINGLE_FAMILY'},
     // ── Georgia — Sur ──
-    {address:'1234 Jefferson Ave, East Point, GA 30344',  city:'East Point', state:'GA',zip:'30344',price:118000,beds:3,baths:1,sqft:1280,days_on_zillow:55, zestimate:0,      rent_zestimate:1420, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1968},
-    {address:'867 Godby Rd, College Park, GA 30349',      city:'College Park',state:'GA',zip:'30349',price:122000,beds:3,baths:1,sqft:1390,days_on_zillow:48, zestimate:0,      rent_zestimate:1440, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1971},
-    {address:'503 Elm St, Morrow, GA 30260',              city:'Morrow',     state:'GA',zip:'30260',price:119000,beds:3,baths:2,sqft:1380,days_on_zillow:52, zestimate:0,      rent_zestimate:1390, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1973},
-    {address:'2856 Battle Creek Rd, Jonesboro, GA 30236', city:'Jonesboro',  state:'GA',zip:'30236',price:136000,beds:4,baths:2,sqft:1750,days_on_zillow:67, zestimate:0,      rent_zestimate:1580, status:'House for sale',listing_type:'FSBA',     year_built:1986},
-    {address:'1122 Jonesboro Rd, McDonough, GA 30253',    city:'McDonough',  state:'GA',zip:'30253',price:149000,beds:4,baths:2,sqft:1820,days_on_zillow:11, zestimate:0,      rent_zestimate:1660, status:'For sale by owner',listing_type:'FSBO',   year_built:1997},
+    {address:'1234 Jefferson Ave, East Point, GA 30344',  city:'East Point', state:'GA',zip:'30344',price:118000,beds:3,baths:1,sqft:1280,days_on_zillow:55, zestimate:0,      rent_zestimate:1420, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1968, home_type:'SINGLE_FAMILY'},
+    {address:'867 Godby Rd, College Park, GA 30349',      city:'College Park',state:'GA',zip:'30349',price:122000,beds:3,baths:1,sqft:1390,days_on_zillow:48, zestimate:0,      rent_zestimate:1440, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1971, home_type:'SINGLE_FAMILY'},
+    {address:'503 Elm St, Morrow, GA 30260',              city:'Morrow',     state:'GA',zip:'30260',price:119000,beds:3,baths:2,sqft:1380,days_on_zillow:52, zestimate:0,      rent_zestimate:1390, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1973, home_type:'SINGLE_FAMILY'},
+    {address:'2856 Battle Creek Rd, Jonesboro, GA 30236', city:'Jonesboro',  state:'GA',zip:'30236',price:136000,beds:4,baths:2,sqft:1750,days_on_zillow:67, zestimate:0,      rent_zestimate:1580, status:'House for sale',listing_type:'FSBA',     year_built:1986, home_type:'SINGLE_FAMILY'},
+    {address:'1122 Jonesboro Rd, McDonough, GA 30253',    city:'McDonough',  state:'GA',zip:'30253',price:149000,beds:4,baths:2,sqft:1820,days_on_zillow:11, zestimate:0,      rent_zestimate:1660, status:'For sale by owner',listing_type:'FSBO',   year_built:1997, home_type:'SINGLE_FAMILY'},
     // ── Georgia — Oeste ──
-    {address:'3340 Bankhead Hwy, Douglasville, GA 30134', city:'Douglasville',state:'GA',zip:'30134',price:126000,beds:3,baths:2,sqft:1450,days_on_zillow:44, zestimate:0,      rent_zestimate:1440, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1977},
-    {address:'789 Veterans Memorial, Austell, GA 30168',  city:'Austell',    state:'GA',zip:'30168',price:145000,beds:3,baths:2,sqft:1520,days_on_zillow:58, zestimate:0,      rent_zestimate:1490, status:'House for sale',listing_type:'FSBA',     year_built:1982},
+    {address:'3340 Bankhead Hwy, Douglasville, GA 30134', city:'Douglasville',state:'GA',zip:'30134',price:126000,beds:3,baths:2,sqft:1450,days_on_zillow:44, zestimate:0,      rent_zestimate:1440, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1977, home_type:'SINGLE_FAMILY'},
+    {address:'789 Veterans Memorial, Austell, GA 30168',  city:'Austell',    state:'GA',zip:'30168',price:145000,beds:3,baths:2,sqft:1520,days_on_zillow:58, zestimate:0,      rent_zestimate:1490, status:'House for sale',listing_type:'FSBA',     year_built:1982, home_type:'SINGLE_FAMILY'},
     // ── Georgia — Norte/Este ──
-    {address:'412 Industrial Blvd, Lithonia, GA 30058',   city:'Lithonia',   state:'GA',zip:'30058',price:112000,beds:3,baths:2,sqft:1480,days_on_zillow:41, zestimate:0,      rent_zestimate:1460, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1972},
-    {address:'2211 Highway 138 SE, Conyers, GA 30013',    city:'Conyers',    state:'GA',zip:'30013',price:138000,beds:3,baths:2,sqft:1550,days_on_zillow:53, zestimate:0,      rent_zestimate:1520, status:'House for sale',listing_type:'FSBA',     year_built:1984},
+    {address:'412 Industrial Blvd, Lithonia, GA 30058',   city:'Lithonia',   state:'GA',zip:'30058',price:112000,beds:3,baths:2,sqft:1480,days_on_zillow:41, zestimate:0,      rent_zestimate:1460, status:'Foreclosure',listing_type:'BANK_OWNED', year_built:1972, home_type:'SINGLE_FAMILY'},
+    {address:'2211 Highway 138 SE, Conyers, GA 30013',    city:'Conyers',    state:'GA',zip:'30013',price:138000,beds:3,baths:2,sqft:1550,days_on_zillow:53, zestimate:0,      rent_zestimate:1520, status:'House for sale',listing_type:'FSBA',     year_built:1984, home_type:'SINGLE_FAMILY'},
   ];
 
   const filtered = demos.filter(l => {
@@ -1360,17 +1363,23 @@ function removeThinking(id) {
 
 function analyzeWithAI(dealIndex) {
   const d = sortList(allDeals, currentSort)[dealIndex];
+  const co = getCounty(d.city, d.state);
+
   const msg = `Analiza esta propiedad para RONDON LLC:
 
 Dirección: ${d.address}
+Ciudad: ${d.city}, ${d.state} ${d.zip}
 Precio de lista: $${fmt(d.listPrice)}
-Bedrooms: ${d.beds} | Bathrooms: ${d.baths} | Sqft: ${d.sqft||'N/A'}
-Año construcción: ${d.yr||'N/A'}
-Tipo de listing: ${d.ltype||'MLS'}
+Bedrooms: ${d.beds} | Bathrooms: ${d.baths} | Sqft: ${d.sqft > 0 ? d.sqft.toLocaleString() : 'N/A'}
+Año de construcción: ${d.yr > 0 ? d.yr : 'N/A'}
+Tipo de propiedad: ${d.htype || 'SINGLE_FAMILY'}
+Tipo de listing: ${d.ltype || 'MLS'}
 Días en mercado: ${d.dom}
-Zestimate: ${d.arv ? '$'+fmt(d.arv) : 'No disponible'}
-Renta estimada: ${d.rent ? '$'+fmt(d.rent)+'/mo' : 'N/A'}
-URL: ${d.url}`;
+Zestimate: ${d.zest > 0 ? '$'+fmt(d.zest) : 'No disponible'}
+ARV estimado por FlipScout: $${fmt(d.arv)} (${d.arvConf})
+Rehab estimado: $${fmt(d.rehab)}
+Renta estimada: ${d.rent > 0 ? '$'+fmt(d.rent)+'/mo' : 'N/A'}
+Zona/mercado: ${co.lb}`;
 
   analystHistory = [];
   openAnalyst(msg);
