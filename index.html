@@ -196,13 +196,13 @@ header{display:flex;align-items:center;justify-content:space-between;margin-bott
 
 <div class="criteria-card">
   <div class="section-label">
-    <span>Criterios · Alabama & Metro Atlanta (50 mi)</span>
-    <span class="zones-count" id="zones-count">30 zonas</span>
+    <span>Criterios · Alabama (Montgomery · Prattville · Auburn) & Metro Atlanta</span>
+    <span class="zones-count" id="zones-count">33 zonas</span>
   </div>
   <div class="criteria-grid">
     <div class="field">
       <label>Zonas activas</label>
-      <input type="text" id="zone" oninput="updateZonesCount()" value="Prattville AL, Montgomery AL, East Point GA, College Park GA, Jonesboro GA, Morrow GA, Forest Park GA, McDonough GA, Riverdale GA, Stockbridge GA, Douglasville GA, Austell GA, Lithonia GA, Conyers GA, Covington GA, Newnan GA, Griffin GA, Kennesaw GA, Acworth GA, Smyrna GA, Marietta GA, Decatur GA, Lawrenceville GA, Duluth GA, Norcross GA, Buford GA, Cumming GA, Canton GA, Woodstock GA, Roswell GA">
+      <input type="text" id="zone" oninput="updateZonesCount()" value="Prattville AL, Montgomery AL, Auburn AL 36830, Auburn AL 36832, Auburn AL 36879, East Point GA, College Park GA, Jonesboro GA, Morrow GA, Forest Park GA, McDonough GA, Riverdale GA, Stockbridge GA, Douglasville GA, Austell GA, Lithonia GA, Conyers GA, Covington GA, Newnan GA, Griffin GA, Kennesaw GA, Acworth GA, Smyrna GA, Marietta GA, Decatur GA, Lawrenceville GA, Duluth GA, Norcross GA, Buford GA, Cumming GA, Canton GA, Woodstock GA, Roswell GA">
       <div class="zones-hint" id="zones-hint">AL · GA</div>
     </div>
     <div class="field"><label>Precio máx ($)</label><input type="number" id="maxPrice" value="200000" step="5000"></div>
@@ -297,6 +297,8 @@ const COUNTIES = {
   'montgomery':    {bg:'#e8f5ee',bd:'#1a6b3c',tx:'#0a3a1e',lb:'Montgomery, AL',   arv:103,st:'AL'},
   'millbrook':     {bg:'#e8f5ee',bd:'#1a6b3c',tx:'#0a3a1e',lb:'Millbrook, AL',    arv:110,st:'AL'},
   'wetumpka':      {bg:'#e8f5ee',bd:'#1a6b3c',tx:'#0a3a1e',lb:'Wetumpka, AL',     arv:105,st:'AL'},
+  'auburn':        {bg:'#e8f5ee',bd:'#1a6b3c',tx:'#0a3a1e',lb:'Auburn, AL',       arv:148,st:'AL'},
+  'opelika':       {bg:'#e8f5ee',bd:'#1a6b3c',tx:'#0a3a1e',lb:'Opelika, AL',      arv:130,st:'AL'},
   // GA Sur — Clayton/Henry (sweet spot)
   'east point':    {bg:'#fef3e2',bd:'#e8a020',tx:'#7a4a00',lb:'East Point, GA',   arv:158,st:'GA'},
   'college park':  {bg:'#fef3e2',bd:'#e8a020',tx:'#7a4a00',lb:'College Park, GA', arv:152,st:'GA'},
@@ -1055,6 +1057,7 @@ const RONDON_SYSTEM_PROMPT = `You are a real estate investment analyst for Rondo
 ## TARGET MARKETS:
 - Montgomery AL: ZIPs 36111, 36109, 36106 (Cloverdale north only)
 - Prattville AL: ZIPs 36066, 36067
+- Auburn AL: ZIPs 36830, 36832, 36879
 - Metro Atlanta GA: Jonesboro 30236, Lithonia 30038, Conyers 30012, Acworth 30102
 
 ## PROPERTY REQUIREMENTS (Georgia):
