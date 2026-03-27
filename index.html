@@ -529,10 +529,11 @@ async function fetchZone(zone, crit) {
   const maxP = isGA ? Math.min(crit.maxPrice, 280000) : Math.min(crit.maxPrice, 140000);
   try {
     const p = new URLSearchParams({
-      location: zone, status:'for_sale', page:'1', page_size:'10',
+      location: zone, status:'for_sale', page:'1', page_size:'15',
       sort:'price_low', result_type:'list',
       price_min:'30000', price_max: String(maxP),
       beds_min: String(crit.minBeds),
+      home_type: 'SINGLE_FAMILY',  // SFR only
     });
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 13000);
@@ -551,8 +552,37 @@ async function fetchZone(zone, crit) {
       return { quota: true, listings: [] };
     }
     const list = d?.data?.results || d?.results || d?.props || (Array.isArray(d) ? d : []);
+
+    // Hard filter: SFR only — exclude mobile, condo, townhouse, multi, land
+    const SFR_TYPES = ['SINGLE_FAMILY','SingleFamily','single_family','House'];
+    const BAD_TYPES = ['MOBILE','MANUFACTURED','CONDO','TOWNHOUSE','MULTI_FAMILY',
+                       'APARTMENT','LAND','LOT','COOPERATIVE','mobile','condo',
+                       'townhouse','manufactured','multi'];
+
     const valid = Array.isArray(list)
-      ? list.filter(l => (l.price||0) > 0 && (l.price||0) <= maxP).slice(0,4)
+      ? list.filter(l => {
+          const price = l.price || 0;
+          if (price <= 0 || price > maxP) return false;
+
+          // Check property type fields
+          const htype = (l.home_type || l.homeType || l.property_type || l.propertyType || '').toString();
+          if (BAD_TYPES.some(t => htype.toLowerCase().includes(t.toLowerCase()))) return false;
+          if (SFR_TYPES.length && htype && !SFR_TYPES.some(t => htype.toLowerCase().includes(t.toLowerCase()))) {
+            // Unknown type — check listing description for red flags
+            const desc = (l.address || '').toLowerCase();
+            if (/mobile|trailer|lot\s*\d+|unit\s*\d+|#\d+/.test(desc)) return false;
+          }
+
+          // Sqft filter — no trailers (usually under 900 sqft)
+          const sqft = l.sqft || l.livingArea || 0;
+          if (sqft > 0 && sqft < 900) return false;
+
+          // Beds filter
+          const beds = l.beds || l.bedrooms || 0;
+          if (beds > 0 && beds < 2) return false;
+
+          return true;
+        }).slice(0, 4)
       : [];
     return { quota: false, listings: valid };
   } catch(e) {
@@ -582,9 +612,20 @@ function analyzeListings(raw, crit) {
     rent:    l.rent_zestimate || 0,
     status:  (l.status_text || l.status || '').toLowerCase(),
     ltype:   l.listing_type || '',
+    htype:   l.home_type || l.homeType || l.property_type || l.propertyType || '',
     url:     l.detail_url || l.detailUrl || 'https://www.zillow.com/homes/for_sale/',
     yr:      l.year_built || l.yearBuilt || 0,
-  })).filter(l => l.price > 0 && l.address !== 'N/A');
+  })).filter(l => {
+    if (l.price <= 0 || l.address === 'N/A') return false;
+    // SFR filter — hard exclude mobile, condo, townhouse, multi-family, land
+    const type = (l.htype + ' ' + l.ltype + ' ' + l.address).toLowerCase();
+    if (/mobile|manufactured|trailer|modular|condo|townhouse|townhome|multi.?family|apartment|lot\s*\d+|unit\s*#?\d+/.test(type)) return false;
+    // Min sqft
+    if (l.sqft > 0 && l.sqft < 900) return false;
+    // Min beds
+    if (l.beds > 0 && l.beds < 2) return false;
+    return true;
+  });
 
   // Deduplicate by address
   const seen = new Set();
@@ -1061,32 +1102,210 @@ async function sendAnalystMessage() {
   input.style.height = 'auto';
 
   appendAnalystMsg('user', msg);
-  analystHistory.push({ role:'user', content: msg });
 
   const thinkingId = appendAnalystThinking();
   document.getElementById('analyst-send').disabled = true;
 
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        system: RONDON_SYSTEM_PROMPT,
-        messages: analystHistory,
-      }),
-    });
-    const data = await res.json();
-    const reply = data.content?.map(b => b.text||'').join('') || 'Sin respuesta.';
-    removeThinking(thinkingId);
-    appendAnalystMsg('assistant', reply);
-    analystHistory.push({ role:'assistant', content: reply });
-  } catch(e) {
-    removeThinking(thinkingId);
-    appendAnalystMsg('assistant', '⚠ Error conectando con el análisis. Intenta de nuevo.');
-  }
+  await delay(600); // simulate thinking
+
+  const reply = runRondonAnalysis(msg);
+  removeThinking(thinkingId);
+  appendAnalystMsg('assistant', reply);
   document.getElementById('analyst-send').disabled = false;
+}
+
+// ── Local RONDON LLC analysis engine ──
+// Runs full disqualify → ARV → rehab → MAO → verdict logic in JS
+function runRondonAnalysis(input) {
+  const txt = input.toLowerCase();
+
+  // ── Parse key data from input ──
+  const priceMatch = input.match(/\$?([\d,]+)/);
+  const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g,'')) : 0;
+
+  const bedsMatch = txt.match(/(\d)\s*(?:bed|bd|bedroom)/);
+  const beds = bedsMatch ? +bedsMatch[1] : 0;
+
+  const bathsMatch = txt.match(/(\d(?:\.\d)?)\s*(?:bath|ba|bathroom)/);
+  const baths = bathsMatch ? +bathsMatch[1] : 0;
+
+  const sqftMatch = txt.match(/([\d,]+)\s*(?:sqft|sq\.?\s*ft|square)/);
+  const sqft = sqftMatch ? parseInt(sqftMatch[1].replace(/,/g,'')) : 0;
+
+  const yrMatch = txt.match(/(?:year|año|built|construid)[^\d]*(\d{4})/);
+  const yr = yrMatch ? +yrMatch[1] : 0;
+
+  const domMatch = txt.match(/(\d+)\s*(?:dom|days on market|días en mercado)/);
+  const dom = domMatch ? +domMatch[1] : 0;
+
+  const zipMatch = input.match(/\b(\d{5})\b/);
+  const zip = zipMatch ? zipMatch[1] : '';
+
+  const zestMatch = input.match(/zestimate[^\$]*\$([\d,]+)/i);
+  const zest = zestMatch ? parseInt(zestMatch[1].replace(/,/g,'')) : 0;
+
+  // Detect state
+  const isAL = /\bAL\b|alabama|montgomery|prattville/i.test(input);
+  const isGA = /\bGA\b|georgia|atlanta|conyers|jonesboro|lithonia|acworth/i.test(input);
+
+  // Detect city
+  let city = '';
+  const cityMatch = input.match(/,\s*([^,\n]+?),?\s*(?:GA|AL)\b/i);
+  if (cityMatch) city = cityMatch[1].trim().toLowerCase();
+
+  // ── STEP 1: Instant Disqualify ──
+  const disqualifyReasons = [];
+
+  if (/mobile|manufactured|modular|lot rent|pad rent/i.test(input))
+    disqualifyReasons.push('🚫 Mobile/manufactured home o lot rent community');
+  if (/condo|townhome|townhouse|HOA.*monthly/i.test(input))
+    disqualifyReasons.push('🚫 Condo o townhome — no aplica para fix-and-flip');
+  if (beds > 0 && beds < 3)
+    disqualifyReasons.push(`🚫 Solo ${beds} bedrooms — mínimo 3`);
+  if (baths > 0 && baths < 2)
+    disqualifyReasons.push(`🚫 Solo ${baths} baños — mínimo 2 full baths`);
+  if (sqft > 0 && sqft < 1100)
+    disqualifyReasons.push(`🚫 ${sqft} sqft — mínimo 1,100 sqft`);
+
+  // Bad ZIPs
+  const badZipsAL = ['36108','36107','36110','36105'];
+  if (zip && badZipsAL.includes(zip))
+    disqualifyReasons.push(`🚫 ZIP ${zip} en Montgomery AL — zona excluida`);
+
+  if (disqualifyReasons.length > 0) {
+    return `## 🔴 DISCARD\n\n**Razón(es):**\n${disqualifyReasons.map(r=>'- '+r).join('\n')}\n\nNo analizar más. Descarta esta propiedad.`;
+  }
+
+  // ── STEP 2: Get ARV ──
+  const co = getCounty(city || '', isGA ? 'GA' : 'AL');
+  const effectiveSqft = sqft || 1400;
+  const isFC = /foreclosure|bank.?owned|auction|reo/i.test(input);
+  const isFSBO = /fsbo|for sale by owner|owner.*selling/i.test(input);
+  const longDOM = dom > 45;
+  const age = yr > 0 ? 2026 - yr : 0;
+
+  let arv, arvNote;
+  if (zest > 0) {
+    arv = isFC ? Math.round(zest * 1.20) : Math.round(zest * 1.05);
+    arvNote = `Zestimate $${fmt(zest)} × ${isFC?'1.20 (foreclosure upside)':'1.05'}`;
+  } else {
+    arv = Math.round(effectiveSqft * co.arv / 1000) * 1000;
+    arvNote = `${effectiveSqft.toLocaleString()} sqft × $${co.arv}/sqft (${co.lb})`;
+  }
+
+  if (arv < 150000) {
+    return `## 🔴 DISCARD\n\n**ARV estimado: $${fmt(arv)}** — por debajo del piso de $150,000 para flip.\n\nARV base: ${arvNote}\n\nNo hay profit posible con este nivel de valor.`;
+  }
+
+  // ── STEP 3: Rehab ──
+  const mkt = isAL ? 0.75 : 1.0;
+  let rehabPsf, rehabTier;
+
+  if (isFC) {
+    // Alabama gets: roofing -80%, plumbing/electrical -50%, others full
+    // Approximate blended discount: ~35% off for AL foreclosure
+    rehabPsf = isAL ? Math.round(45 * 0.65) : 45;
+    rehabTier = 'Distressed ($45/sqft' + (isAL?' · descuentos AL aplicados)':')');
+  } else if (age > 40 || /poor|bad condition|major|needs work|gut/i.test(input)) {
+    rehabPsf = isAL ? Math.round(32 * 0.75) : 32;
+    rehabTier = 'Poor ($32/sqft' + (isAL?' · descuentos AL)':')');
+  } else {
+    rehabPsf = isAL ? Math.round(18 * 0.85) : 18;
+    rehabTier = 'Fair ($18/sqft' + (isAL?' · descuentos AL parciales)':')');
+  }
+  const rehab = Math.round(effectiveSqft * rehabPsf / 1000) * 1000;
+
+  // ── STEP 4: Financial Math ──
+  const mao = Math.round(arv * 0.70 - rehab);
+  const purchaseClose = price > 0 ? Math.round(price * 0.03) : 0;
+  const saleClose = Math.round(arv * 0.08);
+  const holding = longDOM || isFC ? 16000 : 8000;
+  const totalCosts = rehab + purchaseClose + saleClose + holding;
+  const profit = price > 0 ? arv - price - totalCosts : null;
+  const roi = profit && price > 0 ? Math.round((profit / (price + rehab)) * 100) : null;
+  const spread = price > 0 ? mao - price : null;
+
+  // ── STEP 5: Verdict ──
+  let verdict, verdictColor;
+  if (profit === null) {
+    verdict = '⚠️ DATOS INCOMPLETOS';
+    verdictColor = '🟡';
+  } else if (profit >= 40000 && spread >= 0) {
+    verdict = '✅ STRONG PROCEED';
+    verdictColor = '🟢';
+  } else if (profit >= 40000 && spread < 0 && spread >= -15000) {
+    verdict = '🟡 PROCEED PENDING INSPECTION';
+    verdictColor = '🟡';
+  } else if (profit >= 25000 || (spread >= -25000 && spread < 0)) {
+    verdict = '🟠 BORDERLINE';
+    verdictColor = '🟠';
+  } else {
+    verdict = '🔴 DISCARD';
+    verdictColor = '🔴';
+  }
+
+  // ── Format output ──
+  const lines = [
+    `## ${verdictColor} ${verdict}`,
+    ``,
+    `**Propiedad:** ${input.match(/\d+[^,\n]+(?:AL|GA)[^\n]*/i)?.[0] || 'Ver datos'}`,
+    price > 0 ? `**Precio de lista:** $${fmt(price)}` : '**Precio:** No proporcionado — análisis parcial',
+    ``,
+    `---`,
+    ``,
+    `**ARV estimado: $${fmt(arv)}**`,
+    `↳ ${arvNote}`,
+    ``,
+    `**Rehab estimado: $${fmt(rehab)}**`,
+    `↳ Tier: ${rehabTier}`,
+    `↳ ${effectiveSqft.toLocaleString()} sqft × $${rehabPsf}/sqft`,
+    isAL ? '↳ Descuentos Alabama: roofing −80%, plomería/eléctrico −50%' : '',
+    ``,
+    `**MAO (Máxima Oferta Aceptable):**`,
+    `ARV $${fmt(arv)} × 70% = $${fmt(Math.round(arv*0.70))}`,
+    `MAO = $${fmt(Math.round(arv*0.70))} − $${fmt(rehab)} rehab = **$${fmt(mao)}**`,
+    ``,
+    price > 0 ? [
+      `**Comparación con precio de lista:**`,
+      `Precio lista: $${fmt(price)}`,
+      `MAO: $${fmt(mao)}`,
+      `Spread: ${spread >= 0 ? '+' : ''}$${fmt(spread)} ${spread >= 0 ? '✓ Pasa el 70%' : '✗ Sobre el límite'}`,
+    ].join('\n') : '',
+    ``,
+    `**Cálculo de profit:**`,
+    `ARV:                $${fmt(arv)}`,
+    price > 0 ? `− Precio compra:    $${fmt(price)}` : '− Precio compra:    N/A',
+    `− Rehab:            $${fmt(rehab)}`,
+    price > 0 ? `− Cierre compra (3%): $${fmt(purchaseClose)}` : '',
+    `− Cierre venta (8%): $${fmt(saleClose)}`,
+    `− Holding (${holding===16000?'120':'75'} días): $${fmt(holding)}`,
+    profit !== null ? `**= Profit neto:     $${fmt(profit)}** ${profit >= 40000 ? '✓' : profit >= 25000 ? '⚠' : '✗'}` : '= Profit: incalculable sin precio',
+    roi !== null ? `ROI: ${roi}%` : '',
+    ``,
+  ].filter(l => l !== '');
+
+  // Add action recommendation
+  if (verdict.includes('STRONG PROCEED')) {
+    lines.push(`**Acción:** Llama al agente hoy. Los números cierran. Haz oferta a $${fmt(Math.round(mao * 0.97))} para tener margen.`);
+  } else if (verdict.includes('PROCEED PENDING')) {
+    lines.push(`**Acción:** Agenda inspección. Necesitas verificar el estado físico para confirmar el tier de rehab.`);
+    if (spread < 0) lines.push(`Necesitas negociar $${fmt(Math.abs(spread))} a la baja para cerrar en el 70%.`);
+  } else if (verdict.includes('BORDERLINE')) {
+    lines.push(`**Acción:** Solo viable si negocias el precio. Oferta: $${fmt(Math.max(mao, price - 20000))} o menos.`);
+  } else if (verdict.includes('DISCARD')) {
+    lines.push(`**Acción:** Descarta. Los números no cierran en ningún escenario razonable.`);
+  } else {
+    lines.push(`**Acción:** Proporciona precio de lista, sqft y condición para análisis completo.`);
+  }
+
+  if (spread < 0 && !verdict.includes('DISCARD')) {
+    lines.push(``, `⚠ **Red flag:** Precio $${fmt(Math.abs(spread))} sobre MAO. Solo viable con negociación agresiva.`);
+  }
+  if (!zip && !city) {
+    lines.push(``, `⚠ Verifica que la propiedad esté en las zonas target de RONDON LLC.`);
+  }
+
+  return lines.join('\n');
 }
 
 function appendAnalystMsg(role, text) {
