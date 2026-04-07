@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FlipScout v3 — RONDON LLC</title>
-<link href="https://fonths.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Bricolage+Grotesque:wght@400;600;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Bricolage+Grotesque:wght@400;600;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg:#f5f4f0;--surface:#fff;--surface2:#f9f8f5;
@@ -360,6 +360,66 @@ const COUNTIES = {
   'atlanta':       {bg:'#fef0e8',bd:'#d4704a',tx:'#7a2a00',lb:'Atlanta, GA',      arv:223,st:'GA'},
 };
 
+// ═══════════════════════════════════════════════════════════
+// ZIP → ARV RENOVADO (benchmarks 2025 Redfin/Zillow sold)
+// Valor CONSERVADOR del rango — casas renovadas 3/2 full
+// ═══════════════════════════════════════════════════════════
+const ZIP_ARV = {
+  // GA Sur — Clayton / Henry County
+  '30238':225000,'30236':248000,'30253':212000,'30281':192000,'30260':188000,
+  '30344':202000,'30349':178000,'30296':198000,'30297':172000,'30315':172000,
+  '30354':162000,'30034':222000,'30035':168000,'30294':222000,'30273':192000,
+  '30274':198000,'30228':185000,'30052':178000,
+  // GA Oeste — Douglas / Coweta / Carroll
+  '30134':218000,'30135':215000,'30168':228000,'30106':268000,'30132':198000,
+  '30157':195000,'30185':172000,'30117':172000,'30189':248000,'30188':252000,
+  '30141':205000,'30180':185000,'30263':162000,'30265':178000,'30277':188000,
+  // GA Norte/Este — Cobb / DeKalb / Gwinnett
+  '30060':228000,'30062':245000,'30064':252000,'30066':232000,'30067':268000,
+  '30068':285000,'30080':288000,'30082':248000,'30101':238000,'30102':238000,
+  '30144':198000,'30152':245000,'30058':188000,'30012':208000,'30013':202000,
+  '30016':165000,'30014':155000,'30045':178000,'30046':182000,'30043':198000,
+  '30044':198000,'30047':182000,'30078':188000,'30039':172000,'30083':178000,
+  '30084':198000,'30087':182000,'30088':178000,'30032':222000,'30033':232000,
+  '30342':285000,'30319':295000,'30324':278000,'30316':268000,'30317':278000,
+  '30019':198000,'30518':218000,'30519':218000,'30542':218000,'30024':215000,
+  // GA Premium — North Fulton / Forsyth
+  '30075':242000,'30076':262000,'30022':265000,'30004':318000,'30005':352000,
+  '30009':338000,'30097':285000,'30096':258000,'30340':215000,'30341':228000,
+  '30360':222000,'30093':185000,'30071':192000,'30092':218000,
+  '30028':215000,'30040':222000,'30041':228000,
+  // Alabama — Montgomery / Prattville / Auburn
+  '36066':192000,'36067':172000,'36109':152000,'36111':152000,'36116':158000,
+  '36117':165000,'36830':198000,'36832':198000,'36879':195000,
+  '36054':175000,'36092':168000,
+};
+
+// ZIPs excluidos Montgomery AL
+const BAD_ZIPS_MONTGOMERY = new Set(['36104','36105','36107','36108','36110']);
+
+// Calcula ARV en orden de confiabilidad:
+// 1. Benchmark por ZIP (comps reales 2025)
+// 2. Zestimate ×1.25 solo para FC (valor deprimido → ARV renovado)
+// 3. Fallback county $/sqft
+function calcARV(listing, county, sqft, isFC) {
+  const zip = (listing.zip || '').toString().trim();
+  if (zip && ZIP_ARV[zip]) {
+    return { arv: ZIP_ARV[zip], conf: 'zip', note: `Benchmark ZIP ${zip}` };
+  }
+  if (listing.zest > 0 && isFC) {
+    return {
+      arv:  Math.round(listing.zest * 1.25 / 1000) * 1000,
+      conf: 'zest-fc',
+      note: `Zestimate FC ×1.25`
+    };
+  }
+  return {
+    arv:  Math.round(sqft * (county.arv || 160) / 1000) * 1000,
+    conf: 'psf',
+    note: `${county.lb} · ${sqft.toLocaleString()} sqft × $${county.arv}/sqft`
+  };
+}
+
 function getCounty(city, state) {
   const k = (city||'').toLowerCase().trim();
   return COUNTIES[k] || (state==='GA'
@@ -428,12 +488,25 @@ setInterval(() => {
     new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true});
 }, 1000);
 
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   const e = localStorage.getItem('flipscout_email');
   if (e) document.getElementById('email-input').value = e;
-  if (rapidApiKey.length > 10) markConnected();
   updateZonesCount();
   updateBlacklistBtn();
+
+  // If we have a saved key, validate it silently
+  if (rapidApiKey.length > 10) {
+    document.getElementById('api-banner').style.display = 'none'; // Hide while testing
+    document.getElementById('mode-label').textContent = 'Verificando...';
+    const valid = await testApiKey(rapidApiKey);
+    if (valid) {
+      markConnected(); // Keep hidden, show Live
+    } else {
+      // Key failed — show banner again with error
+      showApiError();
+      showAlert('⚠ Tu API key no responde. Puede estar vencida o inválida. Pega una nueva.', 'warn');
+    }
+  }
 });
 
 function updateZonesCount() {
@@ -452,25 +525,74 @@ function parseZones() {
 // ═══════════════════════════════════════════════════════════
 // API KEY
 // ═══════════════════════════════════════════════════════════
-function connectAPI() {
+// ═══════════════════════════════════════════════════════════
+// API KEY — Validación real antes de marcar conectado
+// ═══════════════════════════════════════════════════════════
+async function connectAPI() {
   const key = document.getElementById('apiKeyInput').value
     .replace(/[^\x20-\x7E]/g,'').trim();
   if (key.length < 20) return showToast('⚠ La key parece incompleta');
-  rapidApiKey = key;
-  localStorage.setItem('fs_rapidapi_key', key);
-  markConnected();
-  showToast('✓ Key guardada — presiona Buscar Deals');
+
+  // Show testing state
+  const btn = document.getElementById('connectBtn');
+  const origText = btn.textContent;
+  btn.textContent = 'Verificando...';
+  btn.disabled = true;
+
+  const valid = await testApiKey(key);
+
+  if (valid) {
+    rapidApiKey = key;
+    localStorage.setItem('fs_rapidapi_key', key);
+    markConnected();
+    showToast('✓ API conectada — Zillow Live activo');
+  } else {
+    btn.textContent = origText;
+    btn.disabled = false;
+    showAlert('⚠ La key no responde o es inválida. Verifica en RapidAPI y vuelve a intentarlo.', 'warn');
+    showToast('✗ Key inválida o cupo agotado');
+  }
+}
+
+async function testApiKey(key) {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    const r = await fetch(
+      'https://zillow-real-estate-api.p.rapidapi.com/v1/search?location=Prattville+AL&status=for_sale&page=1&page_size=1&sort=price_low&result_type=list&price_min=50000&price_max=150000&home_type=SINGLE_FAMILY',
+      { headers:{
+          'X-RapidAPI-Key': key,
+          'X-RapidAPI-Host': 'zillow-real-estate-api.p.rapidapi.com'
+        }, signal: ctrl.signal }
+    );
+    clearTimeout(timer);
+    if (r.status === 401 || r.status === 403) return false;
+    const d = await r.json();
+    // Quota exhausted = still a valid key
+    if (d?.message?.toLowerCase().includes('quota')) return true;
+    if (d?.message?.toLowerCase().includes('invalid') || d?.message?.toLowerCase().includes('unauthorized')) return false;
+    return r.ok;
+  } catch(e) {
+    return false;
+  }
 }
 
 function markConnected() {
-  document.getElementById('api-banner').classList.add('connected');
-  document.getElementById('connected-badge').classList.add('show');
-  document.getElementById('apiKeyInput').value = '';
-  document.getElementById('apiKeyInput').placeholder = '✓ Key guardada';
-  document.getElementById('apiKeyInput').disabled = true;
-  document.getElementById('connectBtn').textContent = '✓ Listo';
-  document.getElementById('connectBtn').style.background = '#1a6b3c';
+  document.getElementById('api-banner').style.display = 'none'; // Hide banner completely
   document.getElementById('mode-label').textContent = 'Zillow Live';
+}
+
+function showApiError() {
+  document.getElementById('api-banner').style.display = 'flex';
+  document.getElementById('apiKeyInput').disabled = false;
+  document.getElementById('apiKeyInput').value = '';
+  document.getElementById('apiKeyInput').placeholder = '⚠ Key inválida — pega la correcta';
+  document.getElementById('apiKeyInput').style.borderColor = '#c0392b';
+  document.getElementById('connectBtn').textContent = 'Conectar';
+  document.getElementById('connectBtn').disabled = false;
+  rapidApiKey = '';
+  localStorage.removeItem('fs_rapidapi_key');
+  document.getElementById('mode-label').textContent = 'Demo';
 }
 
 function showAlert(msg, type='warn') {
@@ -574,11 +696,71 @@ async function searchLive(crit) {
   }
 
   if (quotaHit) showAlert('⚠ Cupo de Zillow agotado este mes (Basic = 500 req/mes). Reinicia el 1 de cada mes. Mostrando resultados parciales.');
-  if (!allListings.length) throw new Error('Sin propiedades de Zillow. Cupo agotado o key inválida — borra la key para usar modo demo.');
+  if (!allListings.length) {
+    if (quotaHit) throw new Error('Cupo de Zillow agotado este mes. Se reinicia el 1 de cada mes.');
+    showApiError();
+    throw new Error('Sin respuesta de Zillow. API key inválida o expirada — pega una nueva key.');
+  }
 
   setProgressStep('Analizando deals...');
   setProgressPct(85);
   return analyzeListings(allListings, crit);
+}
+
+// ═══════════════════════════════════════════════════════════
+// TRAILER / MANUFACTURED HOME DETECTION — 5 capas
+// Zillow a veces manda SINGLE_FAMILY para manufactured homes.
+// ═══════════════════════════════════════════════════════════
+function isLikelyTrailerOrJunk(l) {
+  const typeStr = [
+    l.home_type || l.homeType || '',
+    l.property_type || l.propertyType || '',
+    l.listing_type || '',
+    l.address || '',
+    l.description || '',
+    l.status_text || l.status || '',
+  ].join(' ').toLowerCase();
+
+  // CAPA 1: Tipo explícito
+  if (/mobile|manufactured|modular|trailer|pad\s*rent|lot\s*rent|leased\s*land/.test(typeStr)) return true;
+  if (/condo|townhouse|townhome|multi.?family|apartment|cooperative/.test(typeStr)) return true;
+  if (/land|lot\s+for\s+sale/.test(typeStr)) return true;
+
+  // CAPA 2: Dirección con keywords de trailer park
+  const addr = (l.address || '').toLowerCase();
+  if (/lot\s*#?\s*\d+/.test(addr)) return true;
+  if (/mobile\s*estate|trailer\s*park|mhp/.test(addr)) return true;
+  if (/unit\s*#?\s*\d+[^a-z]/i.test(addr) && !/apt|suite|ste/i.test(addr)) return true;
+
+  const price = l.price || 0;
+  const sqft  = l.sqft || l.livingArea || 0;
+  const yr    = l.year_built || l.yearBuilt || 0;
+  const isGA  = /GA/i.test(l.state || '') ||
+                /georgia|atlanta|conyers|jonesboro|lithonia|marietta|kennesaw|duluth/i.test(l.address || '');
+  const ltype = (l.listing_type || '').toUpperCase();
+  const isFC  = ['BANK_OWNED','REO'].includes(ltype);
+
+  // CAPA 3: Price-per-sqft
+  if (sqft > 0 && price > 0) {
+    const ppsf = price / sqft;
+    const floor = isGA ? (isFC ? 44 : 57) : 40;
+    if (ppsf < floor) return true;
+    // Manufactured homes post-1995 GA: grande pero barato
+    if (isGA && yr >= 1995 && ppsf < 54 && sqft > 1350) return true;
+    // AL: trailer grande con precio muy bajo
+    if (!isGA && price < 42000 && sqft > 1000) return true;
+  }
+
+  // CAPA 4: Ratio beds/sqft sospechoso
+  const beds = l.beds || l.bedrooms || 0;
+  if (beds >= 4 && sqft > 0 && sqft < 1250) return true;
+  if (beds >= 3 && sqft > 0 && sqft < 1050) return true;
+
+  // CAPA 5: Precio absoluto muy bajo AL
+  const isAL = /AL/i.test(l.state || '');
+  if (isAL && price > 0 && price < 38000) return true;
+
+  return false;
 }
 
 async function fetchZone(zone, crit) {
@@ -610,47 +792,24 @@ async function fetchZone(zone, crit) {
     }
     const list = d?.data?.results || d?.results || d?.props || (Array.isArray(d) ? d : []);
 
-    // Hard filter: SFR only — exclude mobile, condo, townhouse, multi, land
-    const SFR_TYPES = ['SINGLE_FAMILY','SingleFamily','single_family','House'];
-    const BAD_TYPES = ['MOBILE','MANUFACTURED','CONDO','TOWNHOUSE','MULTI_FAMILY',
-                       'APARTMENT','LAND','LOT','COOPERATIVE','mobile','condo',
-                       'townhouse','manufactured','multi'];
-    const BAD_ZIPS_AL = ['36108','36107','36110','36105','36104'];
-
+    // Filtro multicapa — usa isLikelyTrailerOrJunk + BAD_ZIPS centralizados
     const valid = Array.isArray(list)
       ? list.filter(l => {
           const price = l.price || 0;
           if (price <= 0 || price > maxP) return false;
 
-          // Exclude bad Montgomery ZIPs
+          // ZIPs excluidos Montgomery AL
           const zip = (l.zipcode || l.zip || '').toString();
-          if (BAD_ZIPS_AL.includes(zip)) return false;
+          if (BAD_ZIPS_MONTGOMERY.has(zip)) return false;
 
-          // Check property type
-          const htype = (l.home_type || l.homeType || l.property_type || l.propertyType || '').toString();
-          if (BAD_TYPES.some(t => htype.toLowerCase().includes(t.toLowerCase()))) return false;
+          // Filtro multicapa trailer/manufactured/junk (5 capas)
+          if (isLikelyTrailerOrJunk(l)) return false;
 
-          // Address red flags
-          const addr = (l.address || '').toLowerCase();
-          if (/mobile|trailer|lot\s*\d+|unit\s*#?\d+|manufactured/.test(addr)) return false;
-
-          // Min sqft 1,100
+          // Mínimos absolutos
           const sqft = l.sqft || l.livingArea || 0;
           if (sqft > 0 && sqft < 1100) return false;
-
-          // Min 3 beds
           const beds = l.beds || l.bedrooms || 0;
           if (beds > 0 && beds < 3) return false;
-
-          // Price/sqft floor — catches manufactured homes misclassified as SFR
-          // GA FC/Auction: floor $42/sqft (real distressed stick-built)
-          // GA FSBO/MLS: floor $55/sqft (traila FSBOs cluster at $45-52/sqft)
-          // AL: floor $38/sqft (cheap labor market, genuine low values)
-          const ppsf = sqft > 0 ? price / sqft : 999;
-          const ltype_raw = (l.listing_type || '').toUpperCase();
-          const isFC = ['BANK_OWNED','AUCTION','REO'].includes(ltype_raw);
-          const minPsf = isGA ? (isFC ? 42 : 55) : 38;
-          if (sqft > 0 && ppsf < minPsf) return false;
 
           return true;
         }).slice(0, 4)
@@ -688,34 +847,22 @@ function analyzeListings(raw, crit) {
     yr:      l.year_built || l.yearBuilt || 0,
   })).filter(l => {
     if (l.price <= 0 || l.address === 'N/A') return false;
-
-    // ── Excluded Montgomery AL ZIP codes ──
-    const BAD_ZIPS = ['36108','36107','36110','36105','36104'];
-    if (BAD_ZIPS.includes(l.zip)) return false;
-
-    // ── SFR only — exclude mobile, condo, townhouse, multi, land ──
-    const typeStr = (l.htype + ' ' + l.ltype + ' ' + l.address).toLowerCase();
-    if (/mobile|manufactured|trailer|modular|condo|townhouse|townhome|multi.?family|apartment|lot\s*\d+|unit\s*#?\d+/.test(typeStr)) return false;
-
-    // ── Minimum sqft 1,100 ──
+    // ZIPs excluidos Montgomery AL — centralizado
+    if (BAD_ZIPS_MONTGOMERY.has(l.zip)) return false;
+    // Filtro multicapa trailer/manufactured/junk
+    if (isLikelyTrailerOrJunk({
+      ...l,
+      home_type: l.htype, property_type: l.htype,
+      listing_type: l.ltype, year_built: l.yr,
+      livingArea: l.sqft, bedrooms: l.beds,
+    })) return false;
+    // Mínimos absolutos
     if (l.sqft > 0 && l.sqft < 1100) return false;
-
-    // ── Minimum 3 beds ──
     if (l.beds > 0 && l.beds < 3) return false;
-
-    // ── Minimum 2 baths ──
     if (l.baths > 0 && l.baths < 2) return false;
-
-    // ── Price/sqft floor — catches manufactured homes misclassified as SFR ──
-    const ppsf = l.sqft > 0 ? l.price / l.sqft : 999;
-    const isFC_type = ['BANK_OWNED','AUCTION','REO'].includes(l.ltype);
-    const minPsf = l.state === 'GA' ? (isFC_type ? 42 : 55) : 38;
-    if (l.sqft > 0 && ppsf < minPsf) return false;
-
-        // ── Exclude Auction listings ──
-        if (['AUCTION'].includes((l.ltype || '').toUpperCase()) || /auction/i.test(l.status || '')) return false;
-    
-
+    // Excluir Auction
+    if ((l.ltype || '').toUpperCase() === 'AUCTION') return false;
+    if (/auction/i.test(l.status || '')) return false;
     return true;
   });
 
@@ -736,21 +883,11 @@ function analyzeListings(raw, crit) {
     const sqft = l.sqft || 1400;
     const age = l.yr > 0 ? 2026 - l.yr : 0;
 
-    // ── ARV Calculation ──
-    // Distressed (FC/Auction): zestimate is typically already suppressed,
-    //   ARV = what it will be worth fixed = zestimate * 1.20
-    // Non-distressed: ARV = zestimate * 1.05 (light upside)
-    // No zestimate: use county median $/sqft from COUNTIES table
-    let arv, arvConf;
-    if (l.zest > 0) {
-      arv = isFC
-        ? Math.round(l.zest * 1.20)  // foreclosure upside after full rehab
-        : Math.round(l.zest * 1.05); // MLS listing, minor upside
-      arvConf = 'alta';
-    } else {
-      arv = Math.round(sqft * co.arv / 1000) * 1000;
-      arvConf = 'media';
-    }
+    // ── ARV Calculation — Orden: ZIP benchmark > Zestimate FC > fallback $/sqft ──
+    const { arv, conf: arvConf, note: arvNote } = calcARV(
+      { zip: l.zip, zest: l.zest },
+      co, sqft, isFC
+    );
 
     // ── Rehab Estimation ──
     // AL labor is ~25% cheaper than GA metro
@@ -778,19 +915,26 @@ function analyzeListings(raw, crit) {
     }
     const rehab = Math.round(sqft * rehabPsf / 1000) * 1000;
 
-    // ── Financial Math ──
-    // 70% rule: max offer = ARV × 0.70 − rehab
+    // ── Financial Math — Modelo RONDON LLC ──
     const maxOffer  = Math.round(arv * 0.70 - rehab);
-    const spread    = maxOffer - l.price;    // positive = deal
-    // Closing costs = 6% commissions + 2% closing + 2% holding = 10% of ARV
-    const closing   = Math.round(arv * 0.10);
+    const spread    = maxOffer - l.price;
+
+    // Costos reales RONDON LLC:
+    // Compra 3% | Venta 8% | Holding por velocidad de mercado
+    const purchaseClose = Math.round(l.price * 0.03);
+    const saleClose     = Math.round(arv * 0.08);
+    const holdingCost   = l.dom > 60 ? 14000 : l.dom > 30 ? 12000 : 10000;
+    const closing       = purchaseClose + saleClose + holdingCost;
+
     const profit    = arv - l.price - rehab - closing;
     const invested  = l.price + rehab + closing;
     const roi       = invested > 0 ? Math.round((profit / invested) * 100) : 0;
 
+    // targetPrice: precio máximo para lograr minProfit
+    const targetPrice  = arv - rehab - closing - crit.minProfit;
+
     // ── Negotiation gap ──
     // If the deal doesn't work at list price, tell user exactly what to offer
-    const targetPrice = arv - rehab - closing - crit.minProfit;
     const negoNeeded  = l.price - targetPrice; // how much to negotiate down
 
     // ── Scoring (5–99) ──
